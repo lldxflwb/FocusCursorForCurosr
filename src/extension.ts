@@ -7,6 +7,7 @@ import * as path from 'path';
 interface Project {
     project: string;
     file: string;
+	line: number;
 }
 
 interface ResFocus {
@@ -48,7 +49,15 @@ export function activate(context: vscode.ExtensionContext) {
 						
 						// 打开文件
 						const document = await vscode.workspace.openTextDocument(filePath);
-						await vscode.window.showTextDocument(document);
+						const editor = await vscode.window.showTextDocument(document);
+						
+						// 跳转到指定行号
+						if (data.project.line) {
+							const line = data.project.line - 1; // VSCode的行号从0开始
+							const range = editor.document.lineAt(line).range;
+							editor.selection = new vscode.Selection(range.start, range.start);
+							editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+						}
 					}
 				}
 			} catch (error) {
