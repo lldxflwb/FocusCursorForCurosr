@@ -9,14 +9,20 @@ declare global {
     interface WebSocket {
         readyState: number;
         CLOSED: number;
+        CONNECTING: number;
+        OPEN: number;
         onmessage: (event: any) => void;
         onerror: (event: any) => void;
         onclose: () => void;
+        onopen: () => void;
+        send(data: string): void;
         close(): void;
     }
     var WebSocket: {
         new (url: string): WebSocket;
         readonly CLOSED: number;
+        readonly CONNECTING: number;
+        readonly OPEN: number;
     };
 }
 
@@ -31,7 +37,14 @@ interface ResFocus {
     find_flag: boolean;
 }
 
+interface WebSocketErrorEvent {
+    error: Error;
+    message: string;
+    type: string;
+}
+
 let wsConnection: WebSocket | null = null;
+let outputChannel: vscode.OutputChannel;
 
 async function handleFocusData(data: ResFocus, currentWorkspace: vscode.WorkspaceFolder) {
     if (data.find_flag && data.project) {
@@ -55,15 +68,131 @@ async function handleFocusData(data: ResFocus, currentWorkspace: vscode.Workspac
     }
 }
 
+// 新增 WebSocket 连接创建函数
+async function createWebSocketConnection(workspaceName: string) {
+    if (!wsConnection || wsConnection.readyState === WebSocket.CLOSED) {
+        try {
+            outputChannel.appendLine(`Attempting to connect WebSocket for workspace: ${workspaceName}`);
+            
+            wsConnection = new WebSocket(
+                `ws://localhost:8989/ws?project=${workspaceName}`
+            );
+
+            // 添加心跳检测
+            let pingInterval: NodeJS.Timeout;
+            
+            wsConnection.onopen = () => {
+                outputChannel.appendLine('WebSocket connection established successfully');
+                vscode.window.showInformationMessage('Focus: WebSocket connected');
+                
+                // 设置30秒的心跳间隔
+                pingInterval = setInterval(() => {
+                    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+                        try {
+                            wsConnection.send(JSON.stringify({ type: 'ping' }));
+                            outputChannel.appendLine('Ping sent to server');
+                        } catch (error) {
+                            outputChannel.appendLine(`Failed to send ping: ${error}`);
+                        }
+                    }
+                }, 30000);
+            };
+
+            wsConnection.onmessage = async (event: WebSocket.MessageEvent) => {
+                try {
+                    if (!event.data) {
+                        outputChannel.appendLine('Received empty WebSocket message');
+                        return;
+                    }
+
+                    // 如果是 pong 消息，则只记录日志
+                    if (typeof event.data === 'string') {
+                        try {
+                            const parsedData = JSON.parse(event.data);
+                            if (parsedData.type === 'pong') {
+                                outputChannel.appendLine('Received pong from server');
+                                return;
+                            }
+                        } catch (e) {
+                            // 解析失败，按普通消息处理
+                        }
+                    }
+
+                    outputChannel.appendLine('Received WebSocket data: ' + event.data);
+                    
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    const currentWorkspace = workspaceFolders[0];
+                    const data: ResFocus = JSON.parse(event.data.toString());
+                    await handleFocusData(data, currentWorkspace);
+                } catch (error) {
+                    outputChannel.appendLine('Error processing WebSocket message: ' + JSON.stringify({
+                        error,
+                        rawData: event.data,
+                        dataType: typeof event.data
+                    }));
+                    vscode.window.showErrorMessage(`Focus extension error: ${error}`);
+                }
+            };
+
+            wsConnection.onerror = (error: WebSocketErrorEvent) => {
+                const errorMessage = `WebSocket error: ${error.message || 'Unknown error'}`;
+                outputChannel.appendLine(errorMessage);
+                outputChannel.appendLine(`Error details: ${JSON.stringify(error, null, 2)}`);
+                vscode.window.showErrorMessage(`Focus: ${errorMessage}`);
+            };
+
+            wsConnection.onclose = () => {
+                outputChannel.appendLine('WebSocket connection closed');
+                clearInterval(pingInterval); // 清除心跳定时器
+                wsConnection = null;
+                
+                // 实现重连逻辑
+                const retryDelay = 5000;
+                outputChannel.appendLine(`Will attempt to reconnect in ${retryDelay/1000} seconds...`);
+                
+                setTimeout(() => {
+                    if (vscode.workspace.workspaceFolders) {
+                        outputChannel.appendLine('Attempting to reconnect...');
+                        createWebSocketConnection(vscode.workspace.workspaceFolders[0].name)
+                            .catch(err => {
+                                outputChannel.appendLine(`Reconnection failed: ${err.message}`);
+                            });
+                    }
+                }, retryDelay);
+            };
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            outputChannel.appendLine(`Failed to create WebSocket connection: ${errorMessage}`);
+            vscode.window.showErrorMessage(`Focus: Failed to create WebSocket connection - ${errorMessage}`);
+            throw error;
+        }
+    }
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+    // 创建输出通道
+    outputChannel = vscode.window.createOutputChannel('Focus Extension');
+    
+    // 将原来的 console.log 改为使用 outputChannel
+    outputChannel.appendLine('Focus extension is now active!');
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Focus extension is now active!');
+	// 在激活时检查并创建 WebSocket 连接
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	if (workspaceFolders) {
+		const currentWorkspace = workspaceFolders[0];
+		const config = vscode.workspace.getConfiguration('focus');
+		const mode = config.get<string>('mode', 'http');
 
-	// 注册窗口状态变化事件
+		if (mode === 'websocket') {
+			createWebSocketConnection(currentWorkspace.name);
+		}
+	}
+
 	let disposable = vscode.window.onDidChangeWindowState(async (e) => {
 		if (e.focused) {
 			try {
@@ -76,47 +205,7 @@ export function activate(context: vscode.ExtensionContext) {
 				const config = vscode.workspace.getConfiguration('focus');
 				const mode = config.get<string>('mode', 'http');
 
-				if (mode === 'websocket') {
-					// WebSocket 模式
-					if (!wsConnection || wsConnection.readyState === WebSocket.CLOSED) {
-						wsConnection = new WebSocket(
-							`ws://localhost:8989/ws?project=${currentWorkspace.name}`
-						);
-
-						wsConnection.onmessage = async (event: WebSocket.MessageEvent) => {
-							try {
-								// 添加日志来查看接收到的原始数据
-								console.log('Received WebSocket data:', event.data);
-								
-								// 确保数据不为空
-								if (!event.data) {
-									console.error('Received empty WebSocket message');
-									return;
-								}
-
-								const data: ResFocus = JSON.parse(event.data.toString());
-								await handleFocusData(data, currentWorkspace);
-							} catch (error) {
-								// 更详细的错误日志
-								console.error('Error processing WebSocket message:', {
-									error,
-									rawData: event.data,
-									dataType: typeof event.data
-								});
-								vscode.window.showErrorMessage(`Focus extension error: ${error}`);
-							}
-						};
-
-						wsConnection.onerror = (error: WebSocket.ErrorEvent) => {
-							console.error('WebSocket error:', error);
-							vscode.window.showErrorMessage('WebSocket connection error');
-						};
-
-						wsConnection.onclose = () => {
-							console.log('WebSocket connection closed');
-						};
-					}
-				} else {
+				if (mode === 'http') {
 					// HTTP 模式
 					const response = await axios.get<ResFocus>(
 						`http://localhost:8989/focus?project=${currentWorkspace.name}`
@@ -138,5 +227,9 @@ export function deactivate() {
 	if (wsConnection) {
 		wsConnection.close();
 		wsConnection = null;
+	}
+	// 处理输出通道的清理
+	if (outputChannel) {
+		outputChannel.dispose();
 	}
 }
