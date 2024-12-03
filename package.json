@@ -2,7 +2,7 @@
   "name": "focus",
   "displayName": "Focus",
   "description": "Auto focus and open files based on server response",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -14,7 +14,21 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": []
+    "commands": [],
+    "configuration": {
+      "title": "Focus",
+      "properties": {
+        "focus.mode": {
+          "type": "string",
+          "enum": [
+            "http",
+            "websocket"
+          ],
+          "default": "websocket",
+          "description": "选择同步模式：http (主动拉取) 或 websocket (实时推送)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -25,15 +39,17 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/mocha": "^10.0.6",
     "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.13",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "eslint": "^8.56.0",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "ws": "^8.16.0"
   }
 }
